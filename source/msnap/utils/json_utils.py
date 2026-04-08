@@ -5,6 +5,7 @@ import json
 from msnap.utils.common_const import *
 from msnap.utils import common_utils, file_utils
 
+
 ###########################################################################################
 
 def str_to_dict(json_str: str):
@@ -16,6 +17,7 @@ def str_to_dict(json_str: str):
         common_utils.logging_error("json_util.str_to_dict()", e)
         return None
 
+
 def to_str(input, indent=4):
     try:
         return json.dumps(input, ensure_ascii=False, indent=indent)
@@ -24,24 +26,71 @@ def to_str(input, indent=4):
         common_utils.logging_error("json_util.to_str()", e)
         return ""
 
-def load_file(in_file_path: str, encoding=ENCODING):
+
+def load_jsonl(in_file_path: str, encoding=ENCODING):
+    try:
+        if file_utils.exists(in_file_path):
+            file = file_utils.open_file(in_file_path, encoding, 'r')
+            datas = []
+
+            for line in file:
+                if not line.strip():
+                    continue
+
+                data = json.loads(line)
+                datas.append(data)
+
+            print(f'json_util.load_jsonl() {in_file_path} -> data_size : {len(datas)}')
+            file.close()
+
+            return datas
+
+    except Exception as e:
+        common_utils.logging_error("json_util.load_jsonl()", e)
+        return None
+
+    return None
+
+
+def write_jsonl(datas, out_file_path: str, encoding=ENCODING):
+    try:
+        file_utils.make_parent(out_file_path)
+        file = file_utils.open_file(out_file_path, encoding, 'w')
+
+        for data in datas:
+            json_string = json.dumps(data, ensure_ascii=False)
+            file.write(json_string + '\n')
+        file.close()
+
+        print(f'json_util.write_jsonl() data_size : {len(datas)} -> {out_file_path}')
+        return True
+
+    except Exception as e:
+        common_utils.logging_error("json_util.write_jsonl()", e)
+        return False
+
+
+def load_json(in_file_path: str, encoding=ENCODING):
     try:
         if file_utils.exists(in_file_path):
             file = file_utils.open_file(in_file_path, encoding, 'r')
 
             # 파일을 읽을 때는, load() 호출
             datas = json.load(file)
-            print(f'json_util.load_file() {in_file_path} -> data_size : {len(datas)}')
+
+            print(f'json_util.load_json() {in_file_path} -> data_size : {len(datas)}')
+            file.close()
 
             return datas
 
     except Exception as e:
-        common_utils.logging_error("json_util.load_file()", e)
+        common_utils.logging_error("json_util.load_json()", e)
         return None
 
     return None
 
-def write_file(input, out_file_path: str, encoding=ENCODING, indent=4):
+
+def write_json(input, out_file_path: str, encoding=ENCODING, indent=4):
     try:
         file_utils.make_parent(out_file_path)
 
@@ -49,29 +98,10 @@ def write_file(input, out_file_path: str, encoding=ENCODING, indent=4):
         file.write(to_str(input, indent))
         file.close()
 
-        print(f'json_util.write_file() data_size : {len(input)} -> {out_file_path}')
+        print(f'json_util.write_json() data_size : {len(input)} -> {out_file_path}')
         return True
 
     except Exception as e:
-        common_utils.logging_error("json_util.write_file()", e)
+        common_utils.logging_error("json_util.write_json()", e)
         return False
 
-###########################################################################################
-
-''' if __name__ == "__main__":
-    work_dir = "C:\\nlpshlee\\machine_learning\\morpheme_analyzer\\emjeol_classification_based_cnn\\"
-
-    in_file_path = work_dir + "/conf/ma_conf.json"
-    encoding = "utf8"
-
-    json_dict = load_file_to_dict(in_file_path, encoding)
-    print(type(json_dict))
-    print(f"{json_dict}\n")
-
-    json_str = dict_to_str(json_dict, '\t')
-    print(type(json_str))
-    print(f"{json_str}\n")
-
-    json_dict = str_to_dict(json_str)
-    print(type(json_dict))
-    print(f"{json_dict}\n") '''
