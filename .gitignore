@@ -3,5 +3,6 @@ __pycache__
 .ipynb_checkpoints
 .DS_Store
 *.gz
-data/create_contexts
 data/mcf
+data/create_contexts
+data/check_targets
