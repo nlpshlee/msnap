@@ -68,7 +68,7 @@ def merge_and_save(model_name, dtype, adapter_path, save_path, device_map='auto'
         print(f'{LOG_PREFIX}.merge_and_save() merged model save : {save_path}\n')
 
 
-def make_inputs(tokenizer: PreTrainedTokenizerFast, prompts, max_seq_length, device):
+def make_inputs(tokenizer: PreTrainedTokenizerFast, device: str, prompts, max_seq_length):
     chat_prompts = tokenizer.apply_chat_template(
         prompts,
         tokenize=False,
@@ -83,7 +83,18 @@ def make_inputs(tokenizer: PreTrainedTokenizerFast, prompts, max_seq_length, dev
         return_tensors='pt'
     )
 
-    return inputs.input_ids.to(device), inputs.attention_mask.to(device)
+    return inputs.to(device)
+
+
+def forward(model: AutoModelForCausalLM, tokenizer: PreTrainedTokenizerFast, device: str,
+            prompts, max_seq_length, output_hidden_states=True):
+
+    inputs = model_utils.make_inputs(tokenizer, device, prompts, max_seq_length)
+
+    with torch.no_grad():
+        outputs = model(**inputs, output_hidden_states=output_hidden_states)
+    
+    return outputs
 
 
 def generate(model: AutoModelForCausalLM, tokenizer: PreTrainedTokenizerFast, device: str,
@@ -91,7 +102,9 @@ def generate(model: AutoModelForCausalLM, tokenizer: PreTrainedTokenizerFast, de
              do_sample=False, temperature=None, top_k=None, top_p=None,
              return_all=False):
     
-    input_ids, attention_mask = model_utils.make_inputs(tokenizer, prompts, max_seq_length, device)
+    inputs = model_utils.make_inputs(tokenizer, device, prompts, max_seq_length)
+    input_ids = inputs.input_ids.to(device)
+    attention_mask = inputs.attention_mask.to(device)
 
     with torch.no_grad():
         outputs = model.generate(
