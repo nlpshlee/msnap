@@ -5,6 +5,7 @@ __pycache__
 *.gz
 data/mcf
 data/create_contexts
+data/check_contexts
 data/check_targets
 data/save_hiddens
 data/visualize_hiddens
