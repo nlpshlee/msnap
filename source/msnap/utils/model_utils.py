@@ -1,6 +1,6 @@
 from _init import *
 
-import torch
+import torch, re
 from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
 from peft import PeftModel
 
@@ -144,4 +144,19 @@ def get_generated_texts(model: AutoModelForCausalLM, tokenizer: PreTrainedTokeni
         generated_texts.append(generated_text.strip())
     
     return generated_texts
+
+
+def is_correct(generated_text: str, answer: str):
+    generated_text = generated_text.lower().strip(' ,.!?~')
+    answer = answer.lower().strip(' ,.!?~')
+
+    is_exact = True if generated_text == answer else False
+
+    if is_exact:
+        return [True, True]
+
+    check_pat =  re.compile(rf'\b{re.escape(answer)}\b')
+    is_contains = bool(check_pat.search(generated_text))
+
+    return [False, is_contains]
 
