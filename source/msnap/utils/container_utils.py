@@ -1,7 +1,10 @@
 from _init import *
 
+import itertools
+
 from msnap.utils.common_const import *
 from msnap.utils import string_utils
+
 
 ###########################################################################################
 
@@ -22,6 +25,7 @@ def add_str_int(in_dict: dict, key: str, value: int, txt_option=TXT_OPTION.OFF):
             in_dict[key] = value_prev + value
         else:
             in_dict[key] = value
+
 
 ###########################################################################################
 
@@ -60,6 +64,11 @@ def get_window(in_list: list, idx: int, window_size: int, delim='', pad='$'):
 def chunks(arr, n):
     for i in range(0, len(arr), n):
         yield arr[i: i + n]
+
+
+def get_combinations(in_list: list, extract_n: int):
+    return [list(c) for c in itertools.combinations(in_list, extract_n)]
+
 
 ###########################################################################################
 
