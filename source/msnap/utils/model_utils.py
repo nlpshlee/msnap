@@ -1,6 +1,6 @@
 from _init import *
 
-import torch, re
+import torch, re, contextlib
 from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
 from peft import PeftModel
 
@@ -100,24 +100,32 @@ def forward(model: AutoModelForCausalLM, tokenizer: PreTrainedTokenizerFast, dev
 def generate(model: AutoModelForCausalLM, tokenizer: PreTrainedTokenizerFast, device: str,
              prompts: list, max_seq_length: int, max_new_tokens: int,
              do_sample=False, temperature=None, top_k=None, top_p=None,
+             target_layer_idx=None, misinfo_vecs=None, alpha=1.0,
              return_all=False):
     
     inputs = model_utils.make_inputs(tokenizer, device, prompts, max_seq_length)
     input_ids = inputs.input_ids.to(device)
     attention_mask = inputs.attention_mask.to(device)
 
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=max_new_tokens,
-            pad_token_id=tokenizer.pad_token_id,
-            do_sample=do_sample,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p
-        )
-        # outputs 은 .to(device) 할 필요 없음, input_ids 와 같은 device 에 자동 할당됨
+    if (target_layer_idx is not None) and (misinfo_vecs is not None):
+        misinfo_vecs_t = torch.tensor(misinfo_vecs, dtype=torch.float32).to(device)
+        intervention_context = apply_null_space_projection(model, target_layer_idx, misinfo_vecs_t, alpha)
+    else:
+        intervention_context = contextlib.nullcontext()
+
+    with intervention_context:
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=tokenizer.pad_token_id,
+                do_sample=do_sample,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p
+            )
+            # outputs 은 .to(device) 할 필요 없음, input_ids 와 같은 device 에 자동 할당됨
     
     if return_all:
         return input_ids, outputs
@@ -127,12 +135,14 @@ def generate(model: AutoModelForCausalLM, tokenizer: PreTrainedTokenizerFast, de
 
 def get_generated_texts(model: AutoModelForCausalLM, tokenizer: PreTrainedTokenizerFast, device: str, 
                         prompts: list, max_seq_length: int, max_new_tokens: int, 
-                        do_sample=False, temperature=None, top_k=None, top_p=None):
-    
+                        do_sample=False, temperature=None, top_k=None, top_p=None,
+                        target_layer_idx=None, misinfo_vecs=None, alpha=1.0):
+
     input_ids, outputs = generate(
         model, tokenizer, device,
         prompts, max_seq_length, max_new_tokens,
         do_sample, temperature, top_k, top_p,
+        target_layer_idx, misinfo_vecs, alpha,
         return_all=True
     )
 
@@ -159,4 +169,57 @@ def is_correct(generated_text: str, answer: str):
     is_contains = bool(check_pat.search(generated_text))
 
     return [False, is_contains]
+
+
+def get_null_space_hook(misinfo_vecs: torch.Tensor, alpha: float):
+    '''
+        히든 벡터에서 취약성 공간(misinfo_vecs) 성분을 깎아내는 포워드 훅 함수
+            - misinfo_vecs shape: (k, hidden_size)  (예: PC1 1개만 쓰면 (1, 3072))
+    '''
+    def hook(module, input, output):
+        # h shape: (batch_size, sequence_length, hidden_size)
+        hs = output[0]
+
+        # misinfo_vecs를 현재 히든 벡터와 동일한 디바이스 및 데이터 타입으로 맞춤
+        misinfo_vecs_proj = misinfo_vecs.to(device=hs.device, dtype=hs.dtype)
+
+        # 1. 투영 점수(Score) 계산 : hs 내적 vs^T
+        # shape: (B, S, D) @ (D, k) -> (B, S, k)
+        scores = torch.matmul(hs, misinfo_vecs_proj.T)
+
+        '''
+            적응형(Adaptive) 제어
+                - 만약 PC1이 오답 방향을 향하고 있다면, scores가 양수일 때만(오답에 끌려갈 때만) 개입
+                    - 무조건 깎아내려면 아래 줄을 주석 처리
+                    - 선택적으로 깎으려면 주석 해제
+        '''
+        # scores = torch.relu(scores)
+
+        # 2. 오염된 성분 벡터 복원
+        # shape: (B, S, k) @ (k, D) -> (B, S, D)
+        pollution_vecs = torch.matmul(scores, misinfo_vecs_proj)
+
+        # 3. 영공간 투영 (빼기)
+        projected_vecs = hs - (alpha * pollution_vecs)
+
+        # 수정된 텐서를 다시 튜플로 포장하여 다음 레이어로 전달
+        return (projected_vecs,) + output[1:]
+
+    return hook
+
+
+@contextlib.contextmanager
+def apply_null_space_projection(model, target_layer_idx, misinfo_vecs: torch.Tensor, alpha: float):
+    target_layer = model.model.layers[target_layer_idx]
+
+    # 훅 등록
+    hook_fn = get_null_space_hook(misinfo_vecs, alpha)
+    handle = target_layer.register_forward_hook(hook_fn)
+
+    try:
+        # 여기서 함수가 잠시 멈추고, 메인 코드의 with 블록 안으로 들어가 model.generate() 실행
+        yield
+    finally:
+        # 추론이 끝나면 모델 원상 복구 (매우 중요)
+        handle.remove()
 
