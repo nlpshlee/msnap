@@ -100,16 +100,15 @@ def forward(model: AutoModelForCausalLM, tokenizer: PreTrainedTokenizerFast, dev
 def generate(model: AutoModelForCausalLM, tokenizer: PreTrainedTokenizerFast, device: str,
              prompts: list, max_seq_length: int, max_new_tokens: int,
              do_sample=False, temperature=None, top_k=None, top_p=None,
-             target_layer_idx=None, misinfo_vecs=None, alpha=1.0,
+             target_layer_idxs: list=None, all_layer_misinfo_vecs: dict=None, alpha=1.0,
              return_all=False):
     
     inputs = model_utils.make_inputs(tokenizer, device, prompts, max_seq_length)
     input_ids = inputs.input_ids.to(device)
     attention_mask = inputs.attention_mask.to(device)
 
-    if (target_layer_idx is not None) and (misinfo_vecs is not None):
-        misinfo_vecs_t = torch.tensor(misinfo_vecs, dtype=torch.float32).to(device)
-        intervention_context = apply_null_space_projection(model, target_layer_idx, misinfo_vecs_t, alpha)
+    if (target_layer_idxs is not None) and (all_layer_misinfo_vecs is not None):
+        intervention_context = apply_null_space_projection(model, device, target_layer_idxs, all_layer_misinfo_vecs, alpha)
     else:
         intervention_context = contextlib.nullcontext()
 
@@ -136,13 +135,13 @@ def generate(model: AutoModelForCausalLM, tokenizer: PreTrainedTokenizerFast, de
 def get_generated_texts(model: AutoModelForCausalLM, tokenizer: PreTrainedTokenizerFast, device: str, 
                         prompts: list, max_seq_length: int, max_new_tokens: int, 
                         do_sample=False, temperature=None, top_k=None, top_p=None,
-                        target_layer_idx=None, misinfo_vecs=None, alpha=1.0):
+                        target_layer_idxs: list=None, all_layer_misinfo_vecs: dict=None, alpha=1.0):
 
     input_ids, outputs = generate(
         model, tokenizer, device,
         prompts, max_seq_length, max_new_tokens,
         do_sample, temperature, top_k, top_p,
-        target_layer_idx, misinfo_vecs, alpha,
+        target_layer_idxs, all_layer_misinfo_vecs, alpha,
         return_all=True
     )
 
@@ -180,12 +179,21 @@ def get_null_space_hook(misinfo_vecs: torch.Tensor, alpha: float):
         # h shape: (batch_size, sequence_length, hidden_size)
         hs = output[0]
 
+        '''
+            1번째 스텝은 입력이기 때문에 seq_len >>> 1
+            2번째 스텝 부터는 디코딩 과정이기 때문에 seq_len == 1
+
+            영공간 투영은 전체 입력의 마지막 토큰 또는 디코딩 토큰에만 적용되어야 함
+            즉, 마지막 토큰에만 반영하면 됨
+        '''
+        hs_target = hs[:, -1:, :]
+
         # misinfo_vecs를 현재 히든 벡터와 동일한 디바이스 및 데이터 타입으로 맞춤
-        misinfo_vecs_proj = misinfo_vecs.to(device=hs.device, dtype=hs.dtype)
+        misinfo_vecs_proj = misinfo_vecs.to(device=hs_target.device, dtype=hs_target.dtype)
 
         # 1. 투영 점수(Score) 계산 : hs 내적 vs^T
-        # shape: (B, S, D) @ (D, k) -> (B, S, k)
-        scores = torch.matmul(hs, misinfo_vecs_proj.T)
+        # shape: (B, 1, D) @ (D, k) -> (B, 1, k)
+        scores = torch.matmul(hs_target, misinfo_vecs_proj.T)
 
         '''
             적응형(Adaptive) 제어
@@ -193,33 +201,47 @@ def get_null_space_hook(misinfo_vecs: torch.Tensor, alpha: float):
                     - 무조건 깎아내려면 아래 줄을 주석 처리
                     - 선택적으로 깎으려면 주석 해제
         '''
-        # scores = torch.relu(scores)
+        scores = torch.relu(scores)
 
         # 2. 오염된 성분 벡터 복원
-        # shape: (B, S, k) @ (k, D) -> (B, S, D)
+        # shape: (B, 1, k) @ (k, D) -> (B, 1, D)
         pollution_vecs = torch.matmul(scores, misinfo_vecs_proj)
 
         # 3. 영공간 투영 (빼기)
-        projected_vecs = hs - (alpha * pollution_vecs)
+        projected_target_vecs = hs_target - (alpha * pollution_vecs)
+
+        # 4. 수정된 마지막 토큰을 원본 hs 구조에 덮어씌우기
+        '''
+            inplace 연산 에러를 방지하기 위해 clone() 사용 권장
+                - 원본 hs 텐서의 특정 인덱스에 직접 값을 덮어씌우면 모델의 역전파나 캐시 메모리가 꼬이는 In-place operation 에러가 발생할 수 있음
+        '''
+        hs_new = hs.clone()
+        hs_new[:, -1:, :] = projected_target_vecs
 
         # 수정된 텐서를 다시 튜플로 포장하여 다음 레이어로 전달
-        return (projected_vecs,) + output[1:]
+        return (hs_new,) + output[1:]
 
     return hook
 
 
 @contextlib.contextmanager
-def apply_null_space_projection(model, target_layer_idx, misinfo_vecs: torch.Tensor, alpha: float):
-    target_layer = model.model.layers[target_layer_idx]
-
-    # 훅 등록
-    hook_fn = get_null_space_hook(misinfo_vecs, alpha)
-    handle = target_layer.register_forward_hook(hook_fn)
+def apply_null_space_projection(model, device, target_layer_idxs: list, all_layer_misinfo_vecs: dict, alpha: float):
+    handles = []
 
     try:
-        # 여기서 함수가 잠시 멈추고, 메인 코드의 with 블록 안으로 들어가 model.generate() 실행
+        for target_layer_idx in target_layer_idxs:
+            target_layer = model.model.layers[target_layer_idx]
+            target_misinfo_vecs = torch.tensor(all_layer_misinfo_vecs[target_layer_idx], dtype=torch.float32).to(device)
+
+            # 현재 레이어의 맞춤형 훅 생성 및 등록
+            hook_fn = get_null_space_hook(target_misinfo_vecs, alpha)
+            handle = target_layer.register_forward_hook(hook_fn)
+            handles.append(handle)
+
+        # 추론 시작 : 여기서 함수가 잠시 멈추고, 메인 코드의 with 블록 안으로 들어가 model.generate() 실행
         yield
     finally:
         # 추론이 끝나면 모델 원상 복구 (매우 중요)
-        handle.remove()
+        for handle in handles:
+            handle.remove()
 
